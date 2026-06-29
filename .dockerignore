@@ -1,0 +1,10 @@
+.git
+.github
+.cursor
+web/
+data/
+*.md
+.env
+.env.*
+Jio Business Messaging User and API Integration Guide v2.2.pdf
+bin/
