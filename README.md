@@ -19,8 +19,8 @@ A **WhatsApp + RCS vendor simulator** for dev/testing. Point your messaging plat
 docker compose up --build -d
 ```
 
-- API: http://localhost:8080
-- UI: http://localhost:3000
+- API: http://localhost:8080 (vendor paths + direct `/api` access)
+- UI: http://localhost:3000 (recommended — nginx proxies `/api` to API)
 
 Run migrations and seed demo accounts:
 
@@ -148,7 +148,14 @@ go test ./...
 
 ## Deployment
 
-See [DEPLOY.md](DEPLOY.md) for GitHub Actions CI/CD to **Cloudflare Pages** (frontend) and **CapRover** (backend), including all required secrets and variables.
+See [DEPLOY.md](DEPLOY.md) for production setup:
+
+| Domain | Serves |
+|---|---|
+| `simulator.yourdomain.com` | React dashboard + `/api/*` admin API (nginx proxies `/api` to Go) |
+| `vendor-sim.yourdomain.com` | Vendor simulator only — `/v1/...`, `/v19.0/...` (unchanged paths) |
+
+Locally, open **http://localhost:3000** after `docker compose up` — the web container proxies `/api` to the API server. For hot-reload dev, `make web-dev` uses the same `/api` proxy via Vite.
 
 ## License
 

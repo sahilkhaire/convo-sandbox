@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   deploy-backend:
-    name: Deploy backend (CapRover)
+    name: Deploy API (CapRover)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,31 +23,18 @@ jobs:
           app: ${{ vars.CAPROVER_APP_NAME }}
           token: ${{ secrets.CAPROVER_APP_TOKEN }}
 
-  deploy-frontend:
-    name: Deploy frontend (Cloudflare Pages)
+  deploy-dashboard:
+    name: Deploy dashboard (CapRover nginx)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Use dashboard Dockerfile
+        run: echo '{"schemaVersion":2,"dockerfilePath":"./web/Dockerfile"}' > captain-definition
+
+      - name: Deploy dashboard to CapRover
+        uses: caprover/deploy-from-github@v1.1.2
         with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Install dependencies
-        working-directory: web
-        run: npm ci
-
-      - name: Build
-        working-directory: web
-        env:
-          VITE_API_URL: ${{ vars.VITE_API_URL }}
-        run: npm run build
-
-      - name: Deploy to Cloudflare Pages
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy web/dist --project-name=${{ vars.CLOUDFLARE_PAGES_PROJECT }}
+          server: ${{ secrets.CAPROVER_SERVER }}
+          app: ${{ vars.CAPROVER_DASHBOARD_APP_NAME }}
+          token: ${{ secrets.CAPROVER_DASHBOARD_TOKEN }}

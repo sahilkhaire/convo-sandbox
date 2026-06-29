@@ -1,74 +1,136 @@
 # Deployment Guide
 
-Deploy **backend** to CapRover and **frontend** to Cloudflare Pages via GitHub Actions (`.github/workflows/deploy.yml`).
+Deploy the **dashboard** (React UI + `/api` proxy) and **vendor API** (Go server) on **separate domains**. The dashboard and its admin API share one hostname so nginx can route `/api/*` to the backend and everything else to the SPA.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  simulator.yourdomain.com  (dashboard domain)               │
+│  nginx: static SPA + proxy /api/* → Go backend              │
+├─────────────────────────────────────────────────────────────┤
+│  GET  /              → React app                            │
+│  GET  /login         → React app                            │
+│  GET  /api/health    → Go admin API                         │
+│  POST /api/auth/login→ Go admin API                         │
+│  GET  /api/events    → Go SSE (proxied, buffering off)      │
+└─────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────┐
+│  vendor-sim.yourdomain.com  (vendor domain — separate)      │
+│  Go server directly (production-identical paths, no /api)   │
+├─────────────────────────────────────────────────────────────┤
+│  GET  /v1/oauth/token                                       │
+│  POST /v1/messaging/users/{phone}/assistantMessages/async   │
+│  POST /v19.0/{phone-number-id}/messages                     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+| Route prefix | Domain | Purpose |
+|---|---|---|
+| `/api/*` | Dashboard | Admin UI API (auth, accounts, inbox, webhooks) |
+| `/`, `/login`, … | Dashboard | React SPA |
+| `/v1/*`, `/v19.0/*`, … | Vendor | Jio RCS + Meta WhatsApp simulator (unchanged) |
+
+The frontend is built with `VITE_API_URL=/api` so all dashboard requests are same-origin relative paths — nginx identifies and proxies them.
+
+---
 
 ## Prerequisites
 
-1. **CapRover** server with a deployed app (e.g. `messaging-api`)
-2. **PostgreSQL** reachable from CapRover (CapRover one-click Postgres or external managed DB)
-3. **Cloudflare** account with Pages project created (e.g. `messaging-simulator`)
-4. GitHub repo with Actions enabled
+1. **CapRover** (or any Docker host) with two apps:
+   - `messaging-api` — Go backend (`Dockerfile`)
+   - `messaging-dashboard` — nginx + SPA (`web/Dockerfile`)
+2. **PostgreSQL** reachable from the API app
+3. GitHub repo with Actions enabled
 
 ---
 
 ## GitHub Secrets
 
-Add under **Settings → Secrets and variables → Actions → Secrets**:
-
-| Secret | Description | Example |
-|---|---|---|
-| `CAPROVER_SERVER` | CapRover dashboard URL (HTTPS) | `https://captain.apps.yourdomain.com` |
-| `CAPROVER_APP_TOKEN` | App deploy token from CapRover app → Deployment → Method 3 | `eyJhbGciOiJIUzI1NiIs...` |
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API token with **Cloudflare Pages → Edit** permission | `abc123...` |
-| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID (dashboard URL or Overview page) | `a1b2c3d4e5f6...` |
-
-### How to get CapRover app token
-
-1. CapRover dashboard → your app → **Deployment** tab
-2. Select **Method 3: Deploy from GitHub/Bitbucket/GitLab**
-3. Copy the **app token** (not the root password)
-
-### How to get Cloudflare credentials
-
-1. **Account ID:** Cloudflare dashboard → any zone → right sidebar, or Workers & Pages overview
-2. **API Token:** [dash.cloudflare.com/profile/api-tokens](https://dash.cloudflare.com/profile/api-tokens) → Create Token → Edit Cloudflare Pages template
+| Secret | Description |
+|---|---|
+| `CAPROVER_SERVER` | CapRover dashboard URL |
+| `CAPROVER_APP_TOKEN` | API app deploy token |
+| `CAPROVER_DASHBOARD_TOKEN` | Dashboard app deploy token (can reuse same token if same CapRover) |
 
 ---
 
 ## GitHub Variables
 
-Add under **Settings → Secrets and variables → Actions → Variables**:
-
 | Variable | Description | Example |
 |---|---|---|
-| `CAPROVER_APP_NAME` | CapRover app name (no spaces) | `messaging-api` |
-| `CLOUDFLARE_PAGES_PROJECT` | Cloudflare Pages project name | `messaging-simulator` |
-| `VITE_API_URL` | Public backend API URL used by the frontend build | `https://messaging-api.apps.yourdomain.com/api` |
+| `CAPROVER_APP_NAME` | Go API app name | `messaging-api` |
+| `CAPROVER_DASHBOARD_APP_NAME` | nginx dashboard app name | `messaging-dashboard` |
+| `VITE_API_URL` | Frontend API base (same-domain) | `/api` |
 
-> **Important:** `VITE_API_URL` must be the full URL to your CapRover backend **including `/api`** suffix, because the React app calls `/accounts`, `/conversations`, etc. under that base.
+> **Do not** set `VITE_API_URL` to a full cross-origin URL when frontend and API share a domain. Use `/api`.
 
 ---
 
-## CapRover App Environment Variables
+## CapRover: API app (`messaging-api`)
 
-Set in CapRover → app → **App Configs** → **Environment Variables**:
+**Dockerfile:** `./Dockerfile` (root)
 
-| Variable | Required | Description | Example |
-|---|---|---|---|
-| `DATABASE_URL` | Yes | PostgreSQL connection string | `postgres://user:pass@srv-captain--postgres:5432/messaging_sim?sslmode=disable` |
-| `PORT` | No | HTTP port (CapRover sets automatically) | `80` |
-| `CORS_ORIGIN` | Yes | Allowed frontend origin(s), comma-separated | `https://messaging-simulator.pages.dev,https://simulator.yourdomain.com` |
-| `MEDIA_STORAGE_PATH` | No | Uploaded media directory | `/data/media` |
-| `ENABLE_DATA_RESET` | No | Allow data purge API | `true` |
-| `DEFAULT_WEBHOOK_URL` | No | Default webhook for new accounts | `https://your-platform/webhooks` |
-| `JWT_SECRET` | **Yes (prod)** | Secret for signing admin UI JWTs (min 32 chars) | `openssl rand -base64 48` |
-| `JWT_EXPIRY_HOURS` | No | Admin session token lifetime in hours | `24` |
+**Environment variables:**
 
-> **Auth:** On first visit (no users in DB), the web UI shows a setup form to create the initial admin. Vendor APIs (`/v1/...`, `/v19.0/...`) remain open for platform integration testing. All `/api/*` admin routes require a valid JWT except `/api/auth/status`, `/api/auth/setup`, and `/api/auth/login`.
+| Variable | Required | Example |
+|---|---|---|
+| `DATABASE_URL` | Yes | `postgres://user:pass@srv-captain--postgres:5432/messaging_sim?sslmode=disable` |
+| `JWT_SECRET` | Yes (prod) | `openssl rand -base64 48` |
+| `JWT_EXPIRY_HOURS` | No | `24` |
+| `CORS_ORIGIN` | Yes | `https://simulator.yourdomain.com` |
+| `MEDIA_STORAGE_PATH` | No | `/data/media` |
+| `ENABLE_DATA_RESET` | No | `true` |
+| `DEFAULT_WEBHOOK_URL` | No | `https://your-platform/webhooks` |
+
+**Custom domain:** `vendor-sim.yourdomain.com` (vendor testing only)
+
+**Persistent volume:** `/data/media`
+
+Container HTTP port: **8080**
+
+---
+
+## CapRover: Dashboard app (`messaging-dashboard`)
+
+**Dockerfile:** `./web/Dockerfile`
+
+**Environment variables:**
+
+| Variable | Required | Description |
+|---|---|---|
+| `API_UPSTREAM` | Yes | Internal URL of the Go API app |
+
+Example `API_UPSTREAM` values on CapRover:
+
+```
+http://srv-captain--messaging-api:80
+```
+
+Use the internal service hostname CapRover assigns to your API app (check **App Configs → Service Discovery**).
+
+**Custom domain:** `simulator.yourdomain.com`
+
+The nginx config in `web/nginx.conf.template` proxies `/api/` to `${API_UPSTREAM}/api/` and serves the SPA for all other paths.
+
+**Build arg** (set in CapRover or CI): `VITE_API_URL=/api`
+
+---
+
+## Auth
+
+On first visit (no users in DB), the UI shows a setup form for the initial admin.
+
+All `/api/*` routes require JWT except:
+
+- `GET /api/auth/status`
+- `POST /api/auth/setup`
+- `POST /api/auth/login`
+
+Vendor APIs on the **vendor domain** remain open (no `/api` prefix).
 
 ### Permission model
-
-Each user has **view** permissions (nav visibility) and **action** permissions (API writes):
 
 | Key | Grants |
 |---|---|
@@ -76,61 +138,44 @@ Each user has **view** permissions (nav visibility) and **action** permissions (
 | `view_accounts` | RCS / WhatsApp accounts |
 | `view_webhooks` | Webhook delivery log |
 | `view_settings` | Settings page |
-| `view_users` | User management (admin only in practice) |
-| `action_reply` | Send inbound reply from conversation |
-| `action_delivery` | Manually trigger delivery status |
-| `action_accounts_write` | Create / edit / delete accounts |
+| `view_users` | User management |
+| `action_reply` | Send inbound reply |
+| `action_delivery` | Trigger delivery status |
+| `action_accounts_write` | Manage vendor accounts |
 | `action_data_purge` | Clear all data |
-| `action_users_manage` | Create users, reset passwords, activate/deactivate |
+| `action_users_manage` | Manage users |
 
 Admins (`is_admin=true`) bypass all permission checks.
 
-### CapRover persistent volume
-
-Mount a persistent volume so uploaded media survives redeploys:
-
-- **Path in container:** `/data/media`
-- CapRover → app → **App Configs** → **Persistent Directories** → `/data/media`
-
-### CapRover HTTP settings
-
-- Container HTTP Port: **8080** (or leave default if CapRover maps correctly)
-- Enable HTTPS via CapRover/nginx
-
 ---
 
-## Cloudflare Pages
-
-1. Create a Pages project named `messaging-simulator` (or match `CLOUDFLARE_PAGES_PROJECT`)
-2. First deploy happens via GitHub Actions — no need to connect Git in Cloudflare UI if using wrangler deploy
-3. Optional: add custom domain in Cloudflare Pages → Custom domains
-4. Add that custom domain to CapRover `CORS_ORIGIN`
-
----
-
-## Domain layout (recommended)
-
-| Service | URL |
-|---|---|
-| Frontend (Cloudflare Pages) | `https://messaging-simulator.pages.dev` |
-| Backend (CapRover) | `https://messaging-api.apps.yourdomain.com` |
-| Vendor APIs (same backend) | `https://messaging-api.apps.yourdomain.com/v1/...` and `/v19.0/...` |
-
-Set `VITE_API_URL=https://messaging-api.apps.yourdomain.com/api`
-
----
-
-## Manual deploy (local)
+## Local development
 
 ```bash
-# Backend to CapRover (install caprover CLI first)
-caprover deploy --caproverUrl https://captain.apps.yourdomain.com \
-  --appToken YOUR_APP_TOKEN \
-  --appName messaging-api
+docker compose up --build -d   # UI on :3000, API on :8080 (internal)
+```
 
-# Frontend to Cloudflare Pages
-cd web && VITE_API_URL=https://your-api.com/api npm run build
-npx wrangler pages deploy dist --project-name=messaging-simulator
+Open **http://localhost:3000** — nginx proxies `/api` to the Go server.
+
+For UI hot-reload without Docker:
+
+```bash
+make dev          # API :8080
+make web-dev      # Vite :3000, proxies /api → :8080 (vite.config.ts)
+```
+
+---
+
+## Manual deploy
+
+```bash
+# API
+caprover deploy --caproverUrl https://captain.apps.yourdomain.com \
+  --appToken YOUR_API_TOKEN --appName messaging-api
+
+# Dashboard (from repo root; CapRover uses web/Dockerfile via captain-definition override)
+cd web && VITE_API_URL=/api npm run build
+# Or deploy the web Docker image with API_UPSTREAM set
 ```
 
 ---
@@ -139,7 +184,8 @@ npx wrangler pages deploy dist --project-name=messaging-simulator
 
 | Issue | Fix |
 |---|---|
-| CORS errors in browser | Set `CORS_ORIGIN` on CapRover to exact Cloudflare Pages URL |
-| Frontend can't reach API | Verify `VITE_API_URL` includes `https://` and `/api` |
-| DB connection failed | Check `DATABASE_URL` host is reachable from CapRover container |
-| Migrations fail on boot | Ensure Postgres is running before app starts; check logs |
+| Dashboard 404 on `/api/*` | Check `API_UPSTREAM` points to the API app; verify Go listens on `/api` |
+| SPA routes 404 on refresh | nginx `try_files` must serve `index.html` (included in template) |
+| SSE disconnects | nginx `proxy_buffering off` on `/api/` (included) |
+| CORS errors | Set `CORS_ORIGIN` to the dashboard domain only |
+| Vendor paths wrong | Vendor domain must hit Go directly — paths are `/v1/...`, `/v19.0/...`, not `/api/...` |

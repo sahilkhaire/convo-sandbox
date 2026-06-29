@@ -62,10 +62,10 @@ func main() {
 		MaxAge:           300,
 	}))
 
-	// Admin UI API
+	// Admin UI API — all dashboard routes under /api for same-domain nginx routing
 	r.Mount("/api", adminHandler.Routes())
 
-	// Jio JBM — production paths (api.businessmessaging.jio.com / tgs.businessmessaging.jio.com)
+	// Vendor APIs — production paths on separate domain (no /api prefix)
 	r.Mount("/", rcsHandler.Routes())
 
 	// Meta Graph API — production paths (graph.facebook.com/v19.0/...)

@@ -37,8 +37,12 @@ services:
     build:
       context: ./web
       dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api
     ports:
       - "3000:80"
+    environment:
+      API_UPSTREAM: http://server:8080
     depends_on:
       - server
 
